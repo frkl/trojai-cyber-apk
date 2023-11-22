@@ -1,0 +1,1 @@
+{"arch": "arch.mlp4", "session_dir": null, "data": "./data/weight_hist/data.pt", "argv": ["crossval.py", "--data", "./data/weight_hist/data.pt", "--arch", "arch.mlp4"]}
