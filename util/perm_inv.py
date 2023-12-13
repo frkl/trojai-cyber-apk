@@ -1,6 +1,5 @@
 import itertools
 import util.einsum as einsum
-import util.einsum_M as einsum_M
 
 
 import torch
@@ -428,24 +427,40 @@ class einpool(nn.Module):
         
         self.M=M
         print('%d terms'%len(self.eqs))
-    
-    
-    def forward(self,X,to_cpu=False):
-        if self.M:
-            _einsum=einsum_M
-        else:
-            _einsum=einsum
         
+    
+    def optimize(self,sz,flops=1e12,mem=1e9):
+        flops_=[]
+        mem_=[]
+        eq_filtered=[]
+        for eq in self.eqs:
+            flops_i,mem_i,_=einsum.einsum_path(eq,sz)
+            if flops_i<=flops and mem_i<=mem:
+                eq_filtered.append(eq)
+                flops_.append(flops_i)
+                mem_.append(mem_i)
+        
+        print('Compute %.3f TF Mem %.3f GB'%(sum(flops_)/1e12,sum(mem_)/1e9*4))
+        self.eqs=eq_filtered
+        return
+    
+    
+    def forward(self,X,mask=None,to_cpu=False):
         h=[]
         n=[]
-        Z=X.data.clone().fill_(1)
+        if mask is None:
+            mask=X.data.clone().fill_(1)
+        else:
+            mask=mask.expand_as(X)
+            X=X*mask
+        
         for s in self.eqs:
             #print(s)
-            h_i=_einsum.einsum(s,X)
+            h_i=einsum.einsum(s,X,M=self.M)
             if to_cpu:
                 h_i=h_i.cpu()
             
-            n_i=_einsum.einsum(s,Z)
+            n_i=einsum.einsum(s,mask,M=self.M)
             if to_cpu:
                 n_i=n_i.cpu()
             
@@ -454,8 +469,69 @@ class einpool(nn.Module):
         
         h=torch.stack(h,dim=-1)
         n=torch.stack(n,dim=-1)
-        return h/n.clamp(min=1)
+        return h/n.clamp(min=1e-12)
 
+#Einsum-based pooling network
+class einpool_multihead(nn.Module):
+    def __init__(self,form='X_Bab',order=5,deps=[],eqs=None,equivariant=False,M=False,checkpoint=False):
+        super().__init__()
+        if eqs is None:
+            if equivariant:
+                self.eqs=equivariance_terms(form=form,order=order,deps=deps)
+            else:
+                self.eqs=invariance_terms(form=form,order=order,deps=deps)
+        else:
+            self.eqs=eqs
+        
+        self.M=M
+        self.checkpoint=checkpoint
+        print('%d terms'%len(self.eqs))
+        
+    
+    def nheads(self):
+        n=sum([len(s.split('-')[0].split(',')) for s in self.eqs])
+        return n
+    
+    def forward(self,X,mask=None,to_cpu=False):
+        X.requires_grad_()
+        if self.checkpoint:
+            return torch.utils.checkpoint.checkpoint(lambda X:self.forward_(X,mask,to_cpu),X)
+        else:
+            return self.forward_(X,mask,to_cpu)
+    
+    def forward_(self,X,mask=None,to_cpu=False):
+        assert X.shape[-1]==self.nheads()
+        
+        h=[]
+        n=[]
+        if mask is None:
+            mask=X.data.clone().fill_(1)
+        else:
+            mask=mask.expand_as(X)
+            X=X*mask
+        
+        X=X.split(1,dim=-1)
+        mask=mask.split(1,dim=-1)
+        
+        i=0
+        for s in self.eqs:
+            k=len(s.split('-')[0].split(','))
+            
+            h_i=einsum.einsum(s,*[x.squeeze(-1) for x in X[i:i+k]],M=self.M)
+            if to_cpu:
+                h_i=h_i.cpu()
+            
+            n_i=einsum.einsum(s,*[x.squeeze(-1) for x in mask[i:i+k]],M=self.M)
+            if to_cpu:
+                n_i=n_i.cpu()
+            
+            h.append(h_i)
+            n.append(n_i)
+            i+=k
+        
+        h=torch.stack(h,dim=-1)
+        n=torch.stack(n,dim=-1)
+        return h/n.clamp(min=1e-12)
 
 '''
 

@@ -387,7 +387,7 @@ def einsum_expand(s,x,target_sz):
 
 
 
-def einsum_with_path(path,*args):
+def einsum_with_path(path,*args,M=False):
     X=[v for v in args]
     for (s,ind) in path:
         X_i=[]
@@ -397,13 +397,25 @@ def einsum_with_path(path,*args):
             else:
                 X_i.append(X.pop(i))
         
+        #check num. terms and synthesize new Meq
+        if M is True:
+            lhs=s.split('-')[0]
+            rhs=s.split('>')[1]
+            terms=lhs.split(',')
+            if len(terms)==1:
+                s=terms[0]+'AB'+'->'+rhs+'AB'
+            elif len(terms)==2:
+                s=terms[0]+'AB,'+terms[1]+'BC->'+rhs+'AC'
+            else:
+                a=0/0
+        
         y=torch.einsum(s,*X_i)
         X.append(y);
     
     return y
 
 import torch.utils.checkpoint
-def einsum(s,*args):
+def einsum(s,*args,M=False):
     #Analyze the equation to deal with special cases
     lhs=s.split('-')[0]
     rhs=s.split('>')[-1]
@@ -417,14 +429,21 @@ def einsum(s,*args):
     
     #Compute einsum path optimization
     #print(s)
-    flops,mem,path=einsum_path(s,[tuple(a.shape) for a in args])
+    if M is True:
+        flops,mem,path=einsum_path(s,[tuple(a.shape[:-2]) for a in args])
+    else:
+        flops,mem,path=einsum_path(s,[tuple(a.shape) for a in args])
     
     #Perform optimized einsum
     #v=torch.utils.checkpoint.checkpoint(einsum_with_path,path,*args)
-    v=einsum_with_path(path,*args)
+    v=einsum_with_path(path,*args,M=M)
     
     #Equivariant collapse handling
     if not rhs==rhs2:
+        if M is True:
+            rhs2=rhs2+'AB'
+            rhs=rhs+'AB'
+        
         s2=rhs2+'->'+rhs
         v=einsum_expand(s2,v,tuple(args[0].shape))
     
